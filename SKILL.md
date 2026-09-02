@@ -1,65 +1,88 @@
 ---
 name: acceptance-check
-description: Measures how much AI-proposed code survives unedited in the current git repo — a concrete stand-in for "suggestion acceptance rate" when working with Claude Code instead of inline-completion tools like Copilot. Walks commits co-authored by Claude in a lookback window, diffs what they added, then git-blames HEAD to see how much of that is still AI-attributed versus overwritten by a human-only commit since. Flags a rate above ~90% as the caution pattern documented in AI-coding research. Trigger on "check acceptance rate", "am i rubber-stamping this", "acceptance-check", "how much of this did i actually review".
-argument-hint: [--since "30 days ago"] [--threshold 90]
+description: Measures how much of Claude's output survives without material human revision — across two different surfaces, because they offer different signals. For code (git repos): acceptance_check.py walks commits co-authored by Claude and git-blames HEAD to see how much of what they added is still AI-attributed vs. overwritten by a human-only commit since. For Figma/Framer/general design ideation, which have no git-blame equivalent: design_check.py reads the shared build-log.md (populated manually or by the figma-watch skill) and measures what fraction of logged decisions show no considered alternative. Both flag a caution threshold rather than a hard rule. Trigger on "check acceptance rate", "am i rubber-stamping this", "acceptance-check", "how much of this did i actually review", "first-idea rate", "design-check".
+argument-hint: code: [--since "30 days ago"] [--threshold 90]   design: [--log build-log.md] [--threshold 70]
 ---
 
-## What this measures, and what it doesn't
+## Two scripts, because code and design don't offer the same signal
 
-Copilot-style tools report acceptance rate directly (per-suggestion telemetry).
-Claude Code has no such signal — there's no ghost-text to accept or reject. The
-closest real proxy available from what the harness actually produces: every
-commit Claude makes here carries a `Co-authored-by: Claude` trailer. So this
-script finds those commits, counts the lines they added, and checks — via
-`git blame` at HEAD — how many of those lines are **still attributed to an AI
-commit**, versus having been touched by a human-only commit since.
+Git gives code a real authorship trail — every commit here carries a
+`Co-authored-by: Claude` trailer, so `acceptance_check.py` can measure
+whether AI-added lines are still there, untouched, at HEAD. That's a genuine
+rate with a genuine denominator (lines added).
 
-That's a proxy for "accepted without material review," not a measurement of
-whether anyone actually read the line. A line nobody has revisited since
-looks identical to a line that was reviewed and judged correct. Treat a high
-number as a prompt to look closer, not a verdict on its own — same spirit as
-every other guardrail in this workflow: it exists to interrupt autopilot, not
-to replace judgment.
+Figma and Framer have neither authorship metadata nor a push-based change
+feed available here — `get_metadata` is a pull with no "who changed this"
+field. There's no equivalent of git blame to lean on. What exists instead is
+the build-log / Decision Log convention this workflow already keeps (see the
+Site Build Protocol SOP and the `figma-watch` skill) — a running list of
+design decisions, one line each. `design_check.py` reads that log instead of
+a version-control history, and measures a related but different thing: what
+fraction of *logged* decisions show a considered alternative versus just
+stating the outcome. Different mechanism, same underlying question — is
+review actually happening, or is the first thing that got made just... what
+shipped.
 
-## Running it
+Neither script covers pure ideation with nothing written down anywhere. If a
+direction was decided in conversation and never logged, it's invisible to
+both tools — the same way an un-committed code change is invisible to the
+code one. The log has to exist for this to work at all; see `figma-watch` and
+the Decision Log guidance in the Site Build Protocol for how to keep that
+close to zero-effort.
+
+## Running them
 
 ```
-python3 acceptance_check.py [--since "30 days ago"] [--threshold 90]
+python3 acceptance_check.py --since "30 days ago" --threshold 90     # code, inside a git repo
+python3 design_check.py --log build-log.md --threshold 70            # Figma / Framer / ideation
 ```
 
-Run from inside the git repo you want to check. Needs Python 3 stdlib only —
-no install step.
+Both are Python 3 stdlib only — no install step, no dependencies.
 
 ## Steps when this skill is invoked
 
-1. Confirm the current directory is a git repo. If not, say so and stop —
-   don't guess at a path.
-2. Run `acceptance_check.py` (this skill's own directory) with whatever
-   `--since`/`--threshold` the user gave, defaulting to 30 days / 90%.
-3. Report the output plainly — commit counts, lines added, rate, and the
-   verdict line the script already produces. Don't re-explain what it means
-   beyond what the script itself prints.
-4. If the rate is at or above threshold, don't moralize — the script's own
-   caution line already says what this is a signal of. Just surface it and,
-   if useful, point back to the specific commits/files with the highest
-   survival rate (`git log --since=<window> --grep="Co-authored-by: Claude"
-   -i`) so there's somewhere concrete to look.
+1. Ask (or infer from context) which surface is in question — a git repo
+   with real commits, or a design surface whose only record is a build-log.
+   If both apply to the same project, running both and reporting them
+   together is fine and often the more honest picture.
+2. For code: confirm the current directory is a git repo before running
+   `acceptance_check.py`. If not, say so and stop.
+3. For design: confirm a build-log file actually exists before running
+   `design_check.py`. If it doesn't, say so — this isn't something to
+   fabricate a log for just to produce a number.
+4. Report the script's own output plainly — don't re-explain what it means
+   beyond what it already prints. If either rate is at or above its
+   threshold, don't moralize; the script's own caution line already says
+   what pattern it's flagging.
 
-## Self-check
+## Self-checks
 
-`python3 acceptance_check.py --self-test` runs a synthetic two-commit repo
-(one AI commit adds two lines, one human commit overwrites one of them) and
-asserts the computed rate is exactly 50%. Run this after ever touching the
-script — the git-plumbing logic here is exactly the kind of thing that's
-silently wrong in an edge case (root commits, deleted files, merge commits)
-without a repo to check it against.
+- `python3 acceptance_check.py --self-test` — synthetic two-commit git repo,
+  asserts a 50% acceptance rate.
+- `python3 design_check.py --self-test` — synthetic four-entry log, asserts
+  a 50% first-idea rate.
+
+Run the relevant one after touching either script. Both self-tests were
+written first specifically because this kind of text/history parsing is
+exactly where an edge case (a repo's root commit, a log entry with unusual
+punctuation) goes silently wrong without something to check it against.
 
 ## Known limitations
 
+**Code (`acceptance_check.py`):**
 - Only sees commits, not what happened in an editor before a commit existed.
-  Squashed/rebased history will undercount or misattribute.
-- Doesn't distinguish "reviewed and left alone because it was correct" from
-  "never looked at again." No git-based signal can make that distinction.
-- Merge commits and binary files are not handled specially — heavy use of
-  either will skew the numbers. This is a lightweight heuristic, not an audit
-  tool.
+  Squashed/rebased history undercounts or misattributes.
+- Can't distinguish "reviewed and left alone because it was correct" from
+  "never looked at again."
+- Merge commits and binary files aren't handled specially.
+
+**Design (`design_check.py`):**
+- Entirely dependent on log discipline — silent about anything never
+  written down, and can't tell a genuinely single-path decision from an
+  unreviewed one.
+- The 70% threshold is a working default modeled after the code tool's, not
+  a number any cited study measured directly — recalibrate against your own
+  team's actual baseline rather than treating it as fixed.
+- Doesn't distinguish Figma from Framer from pure ideation — by design, since
+  the log format is meant to be source-agnostic. If that turns out to matter,
+  tag entries at the source and filter before running.
