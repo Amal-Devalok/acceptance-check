@@ -1,18 +1,20 @@
 # acceptance-check
 
 A Claude Code skill that measures how much of Claude's output survives
-without material human revision — for code, and separately for Figma,
-Framer, and general design ideation, because those surfaces don't offer the
-same signal git does.
+without material human revision. Three modes, picked by what's actually
+available — not every user has a git repo, and not every user is willing to
+keep a log:
 
-Two scripts:
-
-- **`acceptance_check.py`** — code, inside a git repo. Uses `git blame` to
-  see how much AI-added code is still there, untouched, at HEAD.
-- **`design_check.py`** — Figma, Framer, or any design/ideation work with no
-  git history to lean on. Reads the shared build-log/Decision Log this
-  workflow already keeps, and measures what fraction of logged decisions
-  show no considered alternative.
+- **`session_check.py`** — the default for non-coders building through
+  **Claude Code, Figma MCP, and Framer MCP**, with no git repo and no log of
+  any kind. Claude tallies its own proposal/reaction pattern live, in a
+  hidden bookkeeping file the user never opens or edits. Zero setup, zero
+  user effort.
+- **`acceptance_check.py`** — real git repos. Uses `git blame` to see how
+  much AI-added code is still there, untouched, at HEAD.
+- **`design_check.py`** — for teams that already keep a build-log/Decision
+  Log. Reads it and measures what fraction of logged decisions show no
+  considered alternative.
 
 ## The problem
 
@@ -24,10 +26,43 @@ lose the signal Copilot research has already flagged as a warning sign:
 accepting AI output at a very high rate correlates with *not actually
 reviewing it*.
 
-Neither script covers pure ideation with nothing ever written down — a
-direction decided in conversation and never logged is invisible to both, the
-same way an uncommitted code change is invisible to the git-based one. The
-log has to exist for the design side to work at all.
+`acceptance_check.py` and `design_check.py` both go quiet on anything that
+happened outside a commit or a log entry — an uncommitted code change or an
+unlogged design decision is invisible to either. `session_check.py` doesn't
+have that gap the same way, because it isn't reading an artifact after the
+fact — it tallies the interaction as it happens.
+
+## What `session_check.py` does (Claude Code + Figma MCP + Framer MCP, no setup)
+
+This is the one built for people who don't write code and won't keep a log —
+they just work through Claude Code, watch Figma/Framer changes happen via
+MCP, and say yes or no to what shows up. There's no artifact to analyze
+after the fact, so this doesn't analyze one — Claude classifies its own
+proposal/reaction pattern **live**, during the session:
+
+1. After anything substantive gets proposed — a webpage draft, a Figma
+   frame edit via MCP, a Framer content change via MCP — Claude watches the
+   user's very next message.
+2. A short affirmation, or just moving on to something else without
+   objecting, counts as **accept**. A correction, a "no," a request for a
+   different direction counts as **revise**.
+3. Claude appends one line to a hidden tally file (`.acceptance-tally.json`,
+   in the project directory) as a quiet side effect — the user never opens
+   or edits it. This is bookkeeping, not a log; nobody is asked to write
+   anything.
+
+```
+acceptance rate = accepted proposals / total proposals
+```
+
+Reported on request, or at a natural checkpoint — not after every single
+event, which would just reproduce the log-fatigue problem this mode exists
+to avoid.
+
+**The honest caveat:** the classification is Claude's own read of tone and
+intent, not an independent measurement. There's a real conflict of interest
+in the AI grading its own acceptance rate. Treat the number as a rough
+signal, correctable on the spot if it looks wrong — not an audit result.
 
 ## What `acceptance_check.py` does (code)
 
@@ -79,8 +114,9 @@ install step, no dependencies.
 ## Use
 
 ```
-python3 acceptance_check.py --since "30 days ago" --threshold 90     # code
-python3 design_check.py --log build-log.md --threshold 70            # design
+python3 session_check.py --threshold 90                              # Claude Code + Figma/Framer MCP, no setup
+python3 acceptance_check.py --since "30 days ago" --threshold 90     # code, git repo
+python3 design_check.py --log build-log.md --threshold 70            # existing build-log
 ```
 
 Or, inside a Claude Code session with the skill installed: `/acceptance-check`.
@@ -88,6 +124,7 @@ Or, inside a Claude Code session with the skill installed: `/acceptance-check`.
 Run the matching `--self-test` any time you touch either script:
 
 ```
+python3 session_check.py --self-test      # synthetic 4-event tally, expects 75%
 python3 acceptance_check.py --self-test   # synthetic 2-commit repo, expects 50%
 python3 design_check.py --self-test       # synthetic 4-entry log, expects 50%
 ```
@@ -166,6 +203,11 @@ measured.** Treat it as a starting point to recalibrate against your own
 team's real baseline, not a target.
 
 ## Known limitations
+
+**`session_check.py` (session):** self-graded by the same AI whose output
+it's rating — a real methodological weakness, stated plainly rather than
+hidden. Tone classification is soft. Only sees what happened inside the
+tool it's running in, not a decision made in a separate conversation or app.
 
 **`acceptance_check.py` (code):**
 - Only sees commits, not what happened in an editor before a commit existed.
